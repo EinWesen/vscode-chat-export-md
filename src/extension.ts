@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as vscode from 'vscode';
+import { convertToMarkdown } from './markdownConverter';
 
 async function readChatExport(): Promise<unknown | undefined> {
 	const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -65,7 +66,28 @@ export function activate(context: vscode.ExtensionContext) {
 	// Now provide the implementation of the command with registerCommand
 	// The commandId parameter must match the command field in package.json
 	const disposable = vscode.commands.registerCommand('einwesen.chat-export-md.export', async () => {
-		return readChatExport();
+		const jsonData = await readChatExport();
+		if (jsonData === undefined) {
+			return;
+		}
+
+		const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+		if (!workspaceUri) {
+			void vscode.window.showErrorMessage('Open a workspace folder before exporting a chat.');
+			return;
+		}
+
+		const markdown = convertToMarkdown(jsonData);
+		const outputUri = await vscode.window.showSaveDialog({
+			defaultUri: vscode.Uri.joinPath(workspaceUri, 'chat-export.md'),
+			filters: { Markdown: ['md'] }
+		});
+		if (!outputUri) {
+			return;
+		}
+
+		await vscode.workspace.fs.writeFile(outputUri, new TextEncoder().encode(markdown));
+		void vscode.window.showInformationMessage('Chat exported as Markdown.');
 	});
 
 	context.subscriptions.push(disposable);
