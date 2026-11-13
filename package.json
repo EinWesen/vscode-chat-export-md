@@ -18,8 +18,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "chat-export-md.helloWorld",
-        "title": "Hello World"
+        "command": "einwesen.chat-export-md.export",
+        "title": "Chat: Export Chat (Markdown) ..."
       }
     ]
   },
