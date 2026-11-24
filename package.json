@@ -2,11 +2,13 @@
   "name": "chat-export-md",
   "displayName": "Chat-Export (MD)",
   "description": "Exports the COPILOT-chat to a readable markdown file",
+  "license": "MIT",
+  "publisher": "EinWesen",
   "repository": {
     "type": "git",
     "url": "https://github.com/EinWesen/vscode-chat-export-md.git"
   },
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.121.0"
   },
