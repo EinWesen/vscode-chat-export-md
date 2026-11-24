@@ -21,7 +21,29 @@
         "command": "einwesen.chat-export-md.export",
         "title": "Chat: Export Chat (Markdown) ..."
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Chat Export (Markdown)",
+      "properties": {
+        "einwesen.chat-export-md.defaultToolCallMode": {
+          "type": "string",
+          "enum": [
+            "alwaysAsk",
+            "full",
+            "summary",
+            "omit"
+          ],
+          "enumItemLabels": [
+            "Always ask",
+            "Full",
+            "Summary only",
+            "Omit tool calls"
+          ],
+          "default": "alwaysAsk",
+          "description": "Choose Always ask to select a tool-call mode on each export. The other options export directly using that mode."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

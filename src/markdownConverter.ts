@@ -1,5 +1,7 @@
 type JsonRecord = Record<string, unknown>;
 
+export type ToolCallMode = 'full' | 'summary' | 'omit';
+
 // JSON access helpers
 function isRecord(value: unknown): value is JsonRecord {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -53,7 +55,11 @@ function jsonText(value: unknown): string {
 }
 
 // Response-part and tool formatting
-function extractTextFromResponsePart(part: unknown): string {
+function extractTextFromResponsePart(
+	part: unknown,
+	toolCallMode: ToolCallMode,
+	toolCallRounds: unknown[]
+): string {
 	if (isRecord(part)) {
 		const kind = fieldString(part, 'kind');
 		if (kind === 'textEditGroup') {
@@ -75,6 +81,12 @@ function extractTextFromResponsePart(part: unknown): string {
 		const content = part.content;
 		const invocationMessage = part.invocationMessage;
 		const pastTenseMessage = part.pastTenseMessage;
+		if (toolCallMode !== 'full' && isRecord(invocationMessage) && 'value' in invocationMessage) {
+			return toolCallMode === 'omit' ? '' : formatToolInvocationSummary(part, toolCallRounds);
+		}
+		if (toolCallMode !== 'full' && isRecord(pastTenseMessage) && 'value' in pastTenseMessage) {
+			return toolCallMode === 'omit' ? '' : formatToolInvocationSummary(part, toolCallRounds);
+		}
 		if (isRecord(content) && 'value' in content) {
 			return `*${stringValue(content.value)}*`;
 		}
@@ -368,11 +380,7 @@ function formatToolInputAndOutput(invocationMessage: string, resultDetails: Json
 	}
 }
 
-function formatToolInvocationDetails(
-	toolData: JsonRecord,
-	toolCallResults: JsonRecord,
-	toolCallRounds: unknown[]
-): string {
+function toolInvocationMessage(toolData: JsonRecord): { invocationMessage: string; originalInvocationMessage: string } {
 	const pastTense = fieldString(recordField(toolData, 'pastTenseMessage'), 'value', 'Ran tool');
 	const invocationValue = toolData.invocationMessage;
 	let invocationMessage = isRecord(invocationValue)
@@ -394,6 +402,45 @@ function formatToolInvocationDetails(
 	}
 	invocationMessage = invocationMessage.replaceAll('Reading ', 'Read ');
 
+	return { invocationMessage, originalInvocationMessage };
+}
+
+function findMatchingToolCall(toolData: JsonRecord, toolCallRounds: unknown[]): JsonRecord | undefined {
+	const toolCalls = toolCallRounds
+		.filter(isRecord)
+		.flatMap(round => arrayField(round, 'toolCalls').filter(isRecord));
+	const toolCallId = fieldString(toolData, 'toolCallId');
+	if (toolCallId) {
+		const matchingCall = toolCalls.find(call => fieldString(call, 'id') === toolCallId);
+		if (matchingCall) {
+			return matchingCall;
+		}
+	}
+
+	const toolId = fieldString(toolData, 'toolId');
+	return toolId ? toolCalls.find(call => fieldString(call, 'name') === toolId) : undefined;
+}
+
+function formatToolInvocationSummary(toolData: JsonRecord, toolCallRounds: unknown[]): string {
+	const { invocationMessage } = toolInvocationMessage(toolData);
+	const matchingToolCall = findMatchingToolCall(toolData, toolCallRounds);
+	const toolName = fieldString(matchingToolCall ?? {}, 'name') || fieldString(toolData, 'toolId');
+	const source = recordField(toolData, 'source');
+	const mcpServerName = fieldString(source, 'type') === 'mcp'
+		? fieldString(source, 'serverLabel') || fieldString(source, 'label')
+		: '';
+	const isGenericMessage = invocationMessage.trim().toLowerCase() === 'ran tool';
+	const toolNameText = isGenericMessage && toolName ? ` \`${toolName}\`` : '';
+	const mcpServerText = mcpServerName ? ` - ${mcpServerName}` : '';
+	return `\n▶▶ ${invocationMessage}${toolNameText}${mcpServerText}\n`;
+}
+
+function formatToolInvocationDetails(
+	toolData: JsonRecord,
+	toolCallResults: JsonRecord,
+	toolCallRounds: unknown[]
+): string {
+	const { invocationMessage, originalInvocationMessage } = toolInvocationMessage(toolData);
 	const toolResultContent = findReadFileResult(originalInvocationMessage, toolCallResults, toolCallRounds);
 	if (toolResultContent.trim()) {
 		return formatToolResultContent(invocationMessage, originalInvocationMessage, toolResultContent);
@@ -576,10 +623,19 @@ function replaceSpecialMarkers(
 	});
 }
 
-function processSpecialMarkers(text: string, toolCallResults: JsonRecord, toolCallRounds: unknown[]): string {
+function processSpecialMarkers(
+	text: string,
+	toolCallResults: JsonRecord,
+	toolCallRounds: unknown[],
+	toolCallMode: ToolCallMode
+): string {
 	text = replaceSpecialMarkers(text, 'TEXT_EDIT_GROUP', formatTextEditGroup);
 	text = replaceSpecialMarkers(text, 'TOOL_INVOCATION', data =>
-		formatToolInvocationDetails(data, toolCallResults, toolCallRounds));
+		toolCallMode === 'omit'
+			? ''
+			: toolCallMode === 'summary'
+				? formatToolInvocationSummary(data, toolCallRounds)
+				: formatToolInvocationDetails(data, toolCallResults, toolCallRounds));
 	return replaceSpecialMarkers(text, 'PROGRESS_TASK', formatProgressTask);
 }
 
@@ -605,6 +661,17 @@ function messageTextForRequest(request: JsonRecord): string {
 		.filter(isRecord)
 		.map(part => typeof part.text === 'string' ? part.text : '')
 		.join('');
+}
+
+function isToolInvocationResponsePart(part: unknown): boolean {
+	if (!isRecord(part) || fieldString(part, 'kind') === 'prepareToolInvocation') {
+		return false;
+	}
+	return fieldString(part, 'kind') === 'toolInvocationSerialized'
+		|| ['invocationMessage', 'pastTenseMessage'].some(key => {
+			const message = part[key];
+			return isRecord(message) && 'value' in message;
+		});
 }
 
 // Chat document assembly
@@ -633,7 +700,7 @@ function renderTableOfContents(requests: JsonRecord[]): string[] {
 	return [];
 }
 
-function renderAssistantSection(request: JsonRecord): string[] {
+function renderAssistantSection(request: JsonRecord, toolCallMode: ToolCallMode): string[] {
 	const response = arrayField(request, 'response');
 	const result = recordField(request, 'result');
 	const errorDetails = recordField(result, 'errorDetails');
@@ -655,6 +722,7 @@ function renderAssistantSection(request: JsonRecord): string[] {
 		let consolidatedResponse = '';
 		const metadata = recordField(result, 'metadata');
 		const toolCallRounds = arrayField(metadata, 'toolCallRounds');
+		const hasToolInvocation = response.some(isToolInvocationResponsePart);
 		const toolResponses = toolCallRounds
 			.filter(isRecord)
 			.map(round => round.response)
@@ -665,22 +733,24 @@ function renderAssistantSection(request: JsonRecord): string[] {
 		}
 
 		const responseParts = response
-			.map(extractTextFromResponsePart)
+			.map(part => extractTextFromResponsePart(part, toolCallMode, toolCallRounds))
 			.filter(part => part && part.trim());
 		if (!consolidatedResponse.trim() && responseParts.length > 0) {
 			consolidatedResponse = responseParts.join('\n');
 		}
 
-		if (responseParts.length > 0) {
+		if (responseParts.length > 0 || (toolCallMode !== 'full' && hasToolInvocation)) {
 			const joinedResponseParts = responseParts.join('\n');
 			const incrementalResponse = processSpecialMarkers(
 				joinedResponseParts,
 				recordField(metadata, 'toolCallResults'),
-				toolCallRounds
+				toolCallRounds,
+				toolCallMode
 			);
 			if (
 				joinedResponseParts.includes('__TOOL_INVOCATION__')
 				|| joinedResponseParts.includes('__TEXT_EDIT_GROUP__')
+				|| (toolCallMode !== 'full' && hasToolInvocation)
 				|| !consolidatedResponse.trim()
 			) {
 				consolidatedResponse = incrementalResponse;
@@ -700,6 +770,9 @@ function renderAssistantSection(request: JsonRecord): string[] {
 		if (formattedError.trim()) {
 			lines.push(formattedError, '');
 		}
+	}
+	if (toolCallMode === 'omit' && lines.length === 2) {
+		return [];
 	}
 	return lines;
 }
@@ -733,7 +806,12 @@ function renderRequestMetadata(request: JsonRecord): string[] {
 	return lines.length > 0 ? [...lines, ''] : lines;
 }
 
-function renderRequest(request: JsonRecord, index: number, requestCount: number): string[] {
+function renderRequest(
+	request: JsonRecord,
+	index: number,
+	requestCount: number,
+	toolCallMode: ToolCallMode
+): string[] {
 	const navigation = ['[^](#table-of-contents)'];
 	navigation.push(index > 1 ? `[<](#request-${index - 1})` : '<');
 	navigation.push(index < requestCount ? `[>](#request-${index + 1})` : '>');
@@ -747,14 +825,14 @@ function renderRequest(request: JsonRecord, index: number, requestCount: number)
 	if (messageText) {
 		lines.push('### Participant', '', formatMessageText(messageText), '');
 	}
-	lines.push(...renderAssistantSection(request), ...renderRequestMetadata(request));
+	lines.push(...renderAssistantSection(request, toolCallMode), ...renderRequestMetadata(request));
 	if (index < requestCount) {
 		lines.push('---', '');
 	}
 	return lines;
 }
 
-export function convertToMarkdown(chatData: unknown): string {
+export function convertToMarkdown(chatData: unknown, toolCallMode: ToolCallMode = 'full'): string {
 	if (!isRecord(chatData)) {
 		throw new TypeError('Chat export must be a JSON object.');
 	}
@@ -767,7 +845,7 @@ export function convertToMarkdown(chatData: unknown): string {
 		''
 	];
 	requests.forEach((request, index) => {
-		markdownLines.push(...renderRequest(request, index + 1, requests.length));
+		markdownLines.push(...renderRequest(request, index + 1, requests.length, toolCallMode));
 	});
 
 	return markdownLines.join('\n');

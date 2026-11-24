@@ -4,7 +4,54 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as vscode from 'vscode';
-import { convertToMarkdown } from './markdownConverter';
+import { convertToMarkdown, type ToolCallMode } from './markdownConverter';
+
+interface ToolCallModeQuickPickItem extends vscode.QuickPickItem {
+	mode: ToolCallMode;
+}
+
+const toolCallModeOptions: ToolCallModeQuickPickItem[] = [
+	{
+		label: 'Full',
+		description: 'Export full detailed tool-call output',
+		mode: 'full'
+	},
+	{
+		label: 'Tool call summary',
+		description: 'Only show that a tool ran without its inputs or outputs',
+		mode: 'summary'
+	},
+	{
+		label: 'Remove tool calls',
+		description: 'Omit all tool-call entries from the Markdown export',
+		mode: 'omit'
+	}
+];
+
+function getToolCallModeOption(mode: string): ToolCallModeQuickPickItem | undefined {
+	const option = toolCallModeOptions.find(item => item.mode === mode);
+	if (!option) {
+		void vscode.window.showErrorMessage(
+			`Invalid einwesen.chat-export-md.defaultToolCallMode setting: "${mode}". Choose Always ask, Full, Summary only, or Omit tool calls.`
+		);
+	}
+	return option;
+}
+
+async function chooseToolCallMode(defaultMode: string): Promise<ToolCallMode | undefined> {
+	const defaultOption = getToolCallModeOption(defaultMode);
+	if (!defaultOption) {
+		return undefined;
+	}
+
+	const choices = [defaultOption, ...toolCallModeOptions.filter(option => option !== defaultOption)];
+	const selectedOption = await vscode.window.showQuickPick(choices, {
+		title: 'Chat: Export Chat (Markdown)',
+		placeHolder: 'Choose how tool calls appear in the export',
+		ignoreFocusOut: true
+	});
+	return selectedOption?.mode;
+}
 
 async function readChatExport(): Promise<unknown | undefined> {
 	const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -66,6 +113,15 @@ export function activate(context: vscode.ExtensionContext) {
 	// Now provide the implementation of the command with registerCommand
 	// The commandId parameter must match the command field in package.json
 	const disposable = vscode.commands.registerCommand('einwesen.chat-export-md.export', async () => {
+		const configuration = vscode.workspace.getConfiguration('einwesen.chat-export-md');
+		const configuredMode = configuration.get<string>('defaultToolCallMode', 'alwaysAsk');
+		const toolCallMode = configuredMode === 'alwaysAsk'
+			? await chooseToolCallMode('summary')
+			: getToolCallModeOption(configuredMode)?.mode;
+		if (!toolCallMode) {
+			return;
+		}
+
 		const jsonData = await readChatExport();
 		if (jsonData === undefined) {
 			return;
@@ -77,7 +133,7 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		const markdown = convertToMarkdown(jsonData);
+		const markdown = convertToMarkdown(jsonData, toolCallMode);
 		const outputUri = await vscode.window.showSaveDialog({
 			defaultUri: vscode.Uri.joinPath(workspaceUri, 'chat-export.md'),
 			filters: { Markdown: ['md'] }
