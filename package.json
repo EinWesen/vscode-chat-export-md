@@ -27,6 +27,7 @@
       "properties": {
         "einwesen.chat-export-md.defaultToolCallMode": {
           "type": "string",
+          "order": 1,
           "enum": [
             "alwaysAsk",
             "full",
@@ -41,6 +42,20 @@
           ],
           "default": "alwaysAsk",
           "description": "Choose Always ask to select a tool-call mode on each export. The other options export directly using that mode."
+        },
+        "einwesen.chat-export-md.preferredToolCallMessage": {
+          "type": "string",
+          "order": 2,
+          "enum": [
+            "pastTenseMessage",
+            "invocationMessage"
+          ],
+          "enumItemLabels": [
+            "Past-tense message",
+            "Invocation message"
+          ],
+          "default": "invocationMessage",
+          "description": "Choose which tool-call message to prefer. If unavailable, the other message is used."
         }
       }
     }

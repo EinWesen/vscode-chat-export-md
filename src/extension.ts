@@ -4,7 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as vscode from 'vscode';
-import { convertToMarkdown, type ToolCallMode } from './markdownConverter';
+import {
+	convertToMarkdown,
+	type ToolCallMessagePreference,
+	type ToolCallMode
+} from './markdownConverter';
 
 interface ToolCallModeQuickPickItem extends vscode.QuickPickItem {
 	mode: ToolCallMode;
@@ -36,6 +40,16 @@ function getToolCallModeOption(mode: string): ToolCallModeQuickPickItem | undefi
 		);
 	}
 	return option;
+}
+
+function getToolCallMessagePreference(value: string): ToolCallMessagePreference | undefined {
+	if (value === 'invocationMessage' || value === 'pastTenseMessage') {
+		return value;
+	}
+	void vscode.window.showErrorMessage(
+		`Invalid einwesen.chat-export-md.preferredToolCallMessage setting: "${value}". Choose Past-tense message or Invocation message.`
+	);
+	return undefined;
 }
 
 async function chooseToolCallMode(defaultMode: string): Promise<ToolCallMode | undefined> {
@@ -115,6 +129,12 @@ export function activate(context: vscode.ExtensionContext) {
 	const disposable = vscode.commands.registerCommand('einwesen.chat-export-md.export', async () => {
 		const configuration = vscode.workspace.getConfiguration('einwesen.chat-export-md');
 		const configuredMode = configuration.get<string>('defaultToolCallMode', 'alwaysAsk');
+		const configuredMessagePreference = configuration.get<string>('preferredToolCallMessage', 'invocationMessage');
+		const messagePreference = getToolCallMessagePreference(configuredMessagePreference);
+		if (!messagePreference) {
+			return;
+		}
+
 		const toolCallMode = configuredMode === 'alwaysAsk'
 			? await chooseToolCallMode('summary')
 			: getToolCallModeOption(configuredMode)?.mode;
@@ -133,7 +153,7 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		const markdown = convertToMarkdown(jsonData, toolCallMode);
+		const markdown = convertToMarkdown(jsonData, toolCallMode, messagePreference);
 		const outputUri = await vscode.window.showSaveDialog({
 			defaultUri: vscode.Uri.joinPath(workspaceUri, 'chat-export.md'),
 			filters: { Markdown: ['md'] }

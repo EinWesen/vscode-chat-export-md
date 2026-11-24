@@ -9,6 +9,8 @@ Adds a command to the command palette to export the copilot chat as a markdown f
 
 Tool-call output can be set to **Full** (include inputs and outputs), **Summary only** (show the invocation and available tool/MCP names without payloads), or **Omit tool calls**. Choose **Always ask** to select a mode for each export; **Summary only** is preselected. Configure this with `einwesen.chat-export-md.defaultToolCallMode`, which defaults to **Always ask**.
 
+Set `einwesen.chat-export-md.preferredToolCallMessage` to choose between the invocation wording and the past-tense wording. It defaults to **Invocation message** and falls back to the other wording when the preferred one is unavailable.
+
 
 ## Known Issues
 

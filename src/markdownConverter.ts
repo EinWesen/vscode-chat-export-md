@@ -1,6 +1,7 @@
 type JsonRecord = Record<string, unknown>;
 
 export type ToolCallMode = 'full' | 'summary' | 'omit';
+export type ToolCallMessagePreference = 'invocationMessage' | 'pastTenseMessage';
 
 // JSON access helpers
 function isRecord(value: unknown): value is JsonRecord {
@@ -37,6 +38,13 @@ function fieldString(record: JsonRecord, key: string, fallback = ''): string {
 	return stringValue(record[key], fallback);
 }
 
+function toolMessageText(value: unknown): string {
+	if (typeof value === 'string') {
+		return value;
+	}
+	return isRecord(value) && typeof value.value === 'string' ? value.value : '';
+}
+
 function isTruthy(value: unknown): boolean {
 	if (value === undefined || value === null || value === false || value === 0 || value === '') {
 		return false;
@@ -58,7 +66,8 @@ function jsonText(value: unknown): string {
 function extractTextFromResponsePart(
 	part: unknown,
 	toolCallMode: ToolCallMode,
-	toolCallRounds: unknown[]
+	toolCallRounds: unknown[],
+	messagePreference: ToolCallMessagePreference
 ): string {
 	if (isRecord(part)) {
 		const kind = fieldString(part, 'kind');
@@ -82,10 +91,10 @@ function extractTextFromResponsePart(
 		const invocationMessage = part.invocationMessage;
 		const pastTenseMessage = part.pastTenseMessage;
 		if (toolCallMode !== 'full' && isRecord(invocationMessage) && 'value' in invocationMessage) {
-			return toolCallMode === 'omit' ? '' : formatToolInvocationSummary(part, toolCallRounds);
+			return toolCallMode === 'omit' ? '' : formatToolInvocationSummary(part, toolCallRounds, messagePreference);
 		}
 		if (toolCallMode !== 'full' && isRecord(pastTenseMessage) && 'value' in pastTenseMessage) {
-			return toolCallMode === 'omit' ? '' : formatToolInvocationSummary(part, toolCallRounds);
+			return toolCallMode === 'omit' ? '' : formatToolInvocationSummary(part, toolCallRounds, messagePreference);
 		}
 		if (isRecord(content) && 'value' in content) {
 			return `*${stringValue(content.value)}*`;
@@ -380,29 +389,70 @@ function formatToolInputAndOutput(invocationMessage: string, resultDetails: Json
 	}
 }
 
-function toolInvocationMessage(toolData: JsonRecord): { invocationMessage: string; originalInvocationMessage: string } {
-	const pastTense = fieldString(recordField(toolData, 'pastTenseMessage'), 'value', 'Ran tool');
-	const invocationValue = toolData.invocationMessage;
-	let invocationMessage = isRecord(invocationValue)
-		? fieldString(invocationValue, 'value', 'Ran tool')
-		: stringValue(invocationValue);
-	if (!invocationMessage) {
-		invocationMessage = pastTense;
+function convertFallbackInvocationToPastTense(message: string): string {
+	const match = /^(\s*)(Reading|Executing|Running|Retrieving)\b/i.exec(message);
+	if (!match) {
+		return message;
 	}
-	const originalInvocationMessage = invocationMessage;
 
-	const fileLink = /\[\]\(file:\/\/([^)]+)(\#[^)]+)?\)/.exec(invocationMessage);
+	const pastTenseByVerb: Record<string, string> = {
+		reading: 'read',
+		executing: 'executed',
+		running: 'ran',
+		retrieving: 'retrieved'
+	};
+	const verb = match[2];
+	const pastTense = pastTenseByVerb[verb.toLowerCase()];
+	if (!pastTense) {
+		return message;
+	}
+
+	const convertedVerb = verb === verb.toUpperCase()
+		? pastTense.toUpperCase()
+		: verb[0] === verb[0].toUpperCase()
+			? `${pastTense[0].toUpperCase()}${pastTense.slice(1)}`
+			: pastTense;
+	return `${match[1]}${convertedVerb}${message.slice(match[0].length)}`;
+}
+
+function toolInvocationMessage(
+	toolData: JsonRecord,
+	messagePreference: ToolCallMessagePreference
+): { invocationMessage: string; originalInvocationMessage: string } {
+	const invocationMessage = toolMessageText(toolData.invocationMessage);
+	const pastTenseMessage = toolMessageText(toolData.pastTenseMessage);
+	const preferredMessage = messagePreference === 'pastTenseMessage' ? pastTenseMessage : invocationMessage;
+	const fallbackMessage = messagePreference === 'pastTenseMessage' ? invocationMessage : pastTenseMessage;
+	const usingInvocationFallback = messagePreference === 'pastTenseMessage'
+		&& !preferredMessage.trim()
+		&& fallbackMessage.trim().length > 0;
+	const usingPastTenseFallback = messagePreference === 'invocationMessage'
+		&& !preferredMessage.trim()
+		&& fallbackMessage.trim().length > 0;
+	let selectedMessage = preferredMessage;
+	if (!selectedMessage.trim()) {
+		selectedMessage = fallbackMessage;
+	}
+	if (!selectedMessage.trim()) {
+		selectedMessage = messagePreference === 'pastTenseMessage' ? 'Ran tool' : 'Running';
+	}
+	if (usingInvocationFallback) {
+		selectedMessage = convertFallbackInvocationToPastTense(selectedMessage);
+	} else if (usingPastTenseFallback) {
+		selectedMessage = selectedMessage.trim().toLowerCase() === 'ran tool'
+			? 'Running'
+			: `... ${selectedMessage.trimStart()}`;
+	}
+	const originalInvocationMessage = selectedMessage;
+
+	const fileLink = /\[\]\(file:\/\/([^)]+)(\#[^)]+)?\)/.exec(selectedMessage);
 	if (fileLink) {
 		const fileName = fileLink[1].split('/').at(-1) ?? fileLink[1];
 		const displayName = `${fileName}${fileLink[2] ?? ''}`;
-		const remainingText = invocationMessage.slice(invocationMessage.indexOf(fileLink[0]) + fileLink[0].length);
-		invocationMessage = remainingText.trim()
-			? `Read **${displayName}**${remainingText}`
-			: `Read **${displayName}**`;
+		selectedMessage = selectedMessage.replace(fileLink[0], `**${displayName}**`);
 	}
-	invocationMessage = invocationMessage.replaceAll('Reading ', 'Read ');
 
-	return { invocationMessage, originalInvocationMessage };
+	return { invocationMessage: selectedMessage, originalInvocationMessage };
 }
 
 function findMatchingToolCall(toolData: JsonRecord, toolCallRounds: unknown[]): JsonRecord | undefined {
@@ -421,15 +471,19 @@ function findMatchingToolCall(toolData: JsonRecord, toolCallRounds: unknown[]): 
 	return toolId ? toolCalls.find(call => fieldString(call, 'name') === toolId) : undefined;
 }
 
-function formatToolInvocationSummary(toolData: JsonRecord, toolCallRounds: unknown[]): string {
-	const { invocationMessage } = toolInvocationMessage(toolData);
+function formatToolInvocationSummary(
+	toolData: JsonRecord,
+	toolCallRounds: unknown[],
+	messagePreference: ToolCallMessagePreference
+): string {
+	const { invocationMessage } = toolInvocationMessage(toolData, messagePreference);
 	const matchingToolCall = findMatchingToolCall(toolData, toolCallRounds);
 	const toolName = fieldString(matchingToolCall ?? {}, 'name') || fieldString(toolData, 'toolId');
 	const source = recordField(toolData, 'source');
 	const mcpServerName = fieldString(source, 'type') === 'mcp'
 		? fieldString(source, 'serverLabel') || fieldString(source, 'label')
 		: '';
-	const isGenericMessage = invocationMessage.trim().toLowerCase() === 'ran tool';
+	const isGenericMessage = ['ran tool', 'running'].includes(invocationMessage.trim().toLowerCase());
 	const toolNameText = isGenericMessage && toolName ? ` \`${toolName}\`` : '';
 	const mcpServerText = mcpServerName ? ` - ${mcpServerName}` : '';
 	return `\n▶▶ ${invocationMessage}${toolNameText}${mcpServerText}\n`;
@@ -438,9 +492,10 @@ function formatToolInvocationSummary(toolData: JsonRecord, toolCallRounds: unkno
 function formatToolInvocationDetails(
 	toolData: JsonRecord,
 	toolCallResults: JsonRecord,
-	toolCallRounds: unknown[]
+	toolCallRounds: unknown[],
+	messagePreference: ToolCallMessagePreference
 ): string {
-	const { invocationMessage, originalInvocationMessage } = toolInvocationMessage(toolData);
+	const { invocationMessage, originalInvocationMessage } = toolInvocationMessage(toolData, messagePreference);
 	const toolResultContent = findReadFileResult(originalInvocationMessage, toolCallResults, toolCallRounds);
 	if (toolResultContent.trim()) {
 		return formatToolResultContent(invocationMessage, originalInvocationMessage, toolResultContent);
@@ -627,15 +682,16 @@ function processSpecialMarkers(
 	text: string,
 	toolCallResults: JsonRecord,
 	toolCallRounds: unknown[],
-	toolCallMode: ToolCallMode
+	toolCallMode: ToolCallMode,
+	messagePreference: ToolCallMessagePreference
 ): string {
 	text = replaceSpecialMarkers(text, 'TEXT_EDIT_GROUP', formatTextEditGroup);
 	text = replaceSpecialMarkers(text, 'TOOL_INVOCATION', data =>
 		toolCallMode === 'omit'
 			? ''
 			: toolCallMode === 'summary'
-				? formatToolInvocationSummary(data, toolCallRounds)
-				: formatToolInvocationDetails(data, toolCallResults, toolCallRounds));
+				? formatToolInvocationSummary(data, toolCallRounds, messagePreference)
+				: formatToolInvocationDetails(data, toolCallResults, toolCallRounds, messagePreference));
 	return replaceSpecialMarkers(text, 'PROGRESS_TASK', formatProgressTask);
 }
 
@@ -700,7 +756,11 @@ function renderTableOfContents(requests: JsonRecord[]): string[] {
 	return [];
 }
 
-function renderAssistantSection(request: JsonRecord, toolCallMode: ToolCallMode): string[] {
+function renderAssistantSection(
+	request: JsonRecord,
+	toolCallMode: ToolCallMode,
+	messagePreference: ToolCallMessagePreference
+): string[] {
 	const response = arrayField(request, 'response');
 	const result = recordField(request, 'result');
 	const errorDetails = recordField(result, 'errorDetails');
@@ -733,7 +793,7 @@ function renderAssistantSection(request: JsonRecord, toolCallMode: ToolCallMode)
 		}
 
 		const responseParts = response
-			.map(part => extractTextFromResponsePart(part, toolCallMode, toolCallRounds))
+			.map(part => extractTextFromResponsePart(part, toolCallMode, toolCallRounds, messagePreference))
 			.filter(part => part && part.trim());
 		if (!consolidatedResponse.trim() && responseParts.length > 0) {
 			consolidatedResponse = responseParts.join('\n');
@@ -745,7 +805,8 @@ function renderAssistantSection(request: JsonRecord, toolCallMode: ToolCallMode)
 				joinedResponseParts,
 				recordField(metadata, 'toolCallResults'),
 				toolCallRounds,
-				toolCallMode
+				toolCallMode,
+				messagePreference
 			);
 			if (
 				joinedResponseParts.includes('__TOOL_INVOCATION__')
@@ -810,7 +871,8 @@ function renderRequest(
 	request: JsonRecord,
 	index: number,
 	requestCount: number,
-	toolCallMode: ToolCallMode
+	toolCallMode: ToolCallMode,
+	messagePreference: ToolCallMessagePreference
 ): string[] {
 	const navigation = ['[^](#table-of-contents)'];
 	navigation.push(index > 1 ? `[<](#request-${index - 1})` : '<');
@@ -825,14 +887,18 @@ function renderRequest(
 	if (messageText) {
 		lines.push('### Participant', '', formatMessageText(messageText), '');
 	}
-	lines.push(...renderAssistantSection(request, toolCallMode), ...renderRequestMetadata(request));
+	lines.push(...renderAssistantSection(request, toolCallMode, messagePreference), ...renderRequestMetadata(request));
 	if (index < requestCount) {
 		lines.push('---', '');
 	}
 	return lines;
 }
 
-export function convertToMarkdown(chatData: unknown, toolCallMode: ToolCallMode = 'full'): string {
+export function convertToMarkdown(
+	chatData: unknown,
+	toolCallMode: ToolCallMode = 'full',
+	messagePreference: ToolCallMessagePreference = 'invocationMessage'
+): string {
 	if (!isRecord(chatData)) {
 		throw new TypeError('Chat export must be a JSON object.');
 	}
@@ -845,7 +911,7 @@ export function convertToMarkdown(chatData: unknown, toolCallMode: ToolCallMode 
 		''
 	];
 	requests.forEach((request, index) => {
-		markdownLines.push(...renderRequest(request, index + 1, requests.length, toolCallMode));
+		markdownLines.push(...renderRequest(request, index + 1, requests.length, toolCallMode, messagePreference));
 	});
 
 	return markdownLines.join('\n');
